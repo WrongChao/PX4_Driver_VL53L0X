@@ -72,9 +72,10 @@
 
 #include <board_config.h>
 
-#include <vl53l0x_api.h>
-#include <vl53l0x_platform.h>
-#include <vl53l0x_i2c_platform.h>
+#include "vl53l0x_api.h"
+#include "vl53l0x_platform.h"
+#include "vl53l0x_i2c_platform.h"
+#include "vl53l0x.hpp"
 
 /* Configuration Constants */
 #define VL53L0X_I2C_BUS 		PX4_I2C_BUS_EXPANSION
@@ -201,7 +202,7 @@ private:
 /*
  * Driver 'main' command.
  */
-extern "C" { __EXPORT int VL53L0X_main(int argc, char *argv[]);}
+extern "C" { __EXPORT int vl53l0x_main(int argc, char *argv[]);}
 
 VL53L0X::VL53L0X(uint8_t rotation, int bus, int address) :
 	I2C("vl53l0x", VL53L0X_DEVICE_PATH, bus, address, 100000),
@@ -288,7 +289,7 @@ VL53L0X::init()
 	for (unsigned counter = 0; counter <= MB12XX_MAX_RANGEFINDERS; counter++) {
 		_index_counter = VL53L0X_I2C_BASEADDR + counter * 2;	/* set temp sonar i2c address to base adress + counter * 2 */
 		set_device_address(_index_counter);			/* set I2c port to temp sonar i2c adress */
-		VL53L0X_Error ret = init_device(_index_counter);
+		VL53L0X_Error ret2 = init_device(_index_counter);
 
 		if (ret2 == VL53L0X_ERROR_NONE) { /* sonar is present -> store address_index in array */
 			addr_ind.push_back(_index_counter);
@@ -323,7 +324,7 @@ VL53L0X::init()
 }
 
 VL53L0X_Error
-init_device(uint8_t address) {
+VL53L0X::init_device(uint8_t address) {
 	VL53L0X_Error Status = VL53L0X_ERROR_NONE;
 	VL53L0X_DeviceInfo_t vl53l0x_dev_info;
 	VL53L0X_Dev_t *pMyDevice = &_vl53l0x_dev;
@@ -333,31 +334,26 @@ init_device(uint8_t address) {
 
 	Status = VL53L0X_DataInit(pMyDevice); // Data initialization
 	if (Status != VL53L0X_ERROR_NONE) {
-		print_pal_error(Status);
 		return Status;
 	}
 	Status = VL53L0X_GetDeviceInfo(pMyDevice, &vl53l0x_dev_info);
 	if (Status != VL53L0X_ERROR_NONE) {
-		print_pal_error(Status);
 		return Status;
 	}
 	if ((vl53l0x_dev_info.ProductRevisionMajor != 1) && (vl53l0x_dev_info.ProductRevisionMinor != 1)) {
 		Status = VL53L0X_ERROR_NOT_SUPPORTED;
-		print_pal_error(Status);
 		return Status;
 	}
 
 	Status = vl53l0x_measure_init(pMyDevice);
-	vl53l0x_status = Status;
 	if (Status != VL53L0X_ERROR_NONE) {
-		print_pal_error(Status);
 		return Status;
 	}
 	return Status;
 }
 
 VL53L0X_Error
-vl53l0x_measure_init(VL53L0X_Dev_t *pMyDevice) {
+VL53L0X::vl53l0x_measure_init(VL53L0X_Dev_t *pMyDevice) {
 	VL53L0X_Error Status = VL53L0X_ERROR_NONE;
 
 	//FixPoint1616_t LimitCheckCurrent;
@@ -368,32 +364,23 @@ vl53l0x_measure_init(VL53L0X_Dev_t *pMyDevice) {
 	// Device Initialization
 	Status = VL53L0X_StaticInit(pMyDevice);
 	if (Status != VL53L0X_ERROR_NONE) {
-		//printf ("Call of VL53L0X_StaticInit\n");
-		print_pal_error(Status);
 		return Status;
 	}
 	// Device Initialization
 	Status = VL53L0X_PerformRefCalibration(pMyDevice, &VhvSettings, &PhaseCal);
 	if (Status != VL53L0X_ERROR_NONE) {
-		//printf ("Call of VL53L0X_PerformRefCalibration\n");
-		print_pal_error(Status);
 		return Status;
 	}
 
 	// needed if a coverglass is used and no calibration has been performed
 	Status = VL53L0X_PerformRefSpadManagement(pMyDevice, &refSpadCount, &isApertureSpads);
 	if (Status != VL53L0X_ERROR_NONE) {
-		//printf ("Call of VL53L0X_PerformRefSpadManagement\n");
-		//printf ("refSpadCount = %d, isApertureSpads = %d\n", refSpadCount, isApertureSpads);
-		print_pal_error(Status);
 		return Status;
 	}
 
 	// no need to do this when we use VL53L0X_PerformSingleRangingMeasurement
 	Status = VL53L0X_SetDeviceMode(pMyDevice, VL53L0X_DEVICEMODE_CONTINUOUS_RANGING); // Setup in single ranging mode
 	if (Status != VL53L0X_ERROR_NONE) {
-		//printf ("Call of VL53L0X_SetDeviceMode\n");
-		print_pal_error(Status);
 		return Status;
 	}
 	if (Status == VL53L0X_ERROR_NONE) {
@@ -424,7 +411,6 @@ vl53l0x_measure_init(VL53L0X_Dev_t *pMyDevice) {
 		Status = VL53L0X_StartMeasurement(pMyDevice);
 	}
 	if (Status != VL53L0X_ERROR_NONE) {
-		print_pal_error(Status);
 		return Status;
 	}
 
@@ -632,7 +618,6 @@ VL53L0X::collect()
 		return ret;
 	}
 
-	uint16_t distance_cm = val[0] << 8 | val[1];
 	float distance_m = float(vl53l0x_data.RangeMilliMeter) * 1e-3f;
 
 	struct distance_sensor_s report;
@@ -670,23 +655,6 @@ VL53L0X::start()
 
 	/* schedule a cycle to start things */
 	work_queue(HPWORK, &_work, (worker_t)&VL53L0X::cycle_trampoline, this, 5);
-
-	/* notify about state change */
-	struct subsystem_info_s info = {};
-	info.present = true;
-	info.enabled = true;
-	info.ok = true;
-	info.subsystem_type = subsystem_info_s::SUBSYSTEM_TYPE_RANGEFINDER;
-
-	static orb_advert_t pub = nullptr;
-
-	if (pub != nullptr) {
-		orb_publish(ORB_ID(subsystem_info), pub, &info);
-
-	} else {
-		pub = orb_advertise(ORB_ID(subsystem_info), &info);
-
-	}
 }
 
 void
@@ -763,6 +731,7 @@ void	stop();
 void	test();
 void	reset();
 void	info();
+
 
 int
 transfer(const uint8_t *send, unsigned send_len, uint8_t *recv, unsigned recv_len) {

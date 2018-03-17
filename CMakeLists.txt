@@ -36,12 +36,12 @@ px4_add_module(
 	COMPILE_FLAGS
 	SRCS
 		vl53l0x.cpp
-		vl53l0x_api.c
-		vl53l0x_api_calibration.c
-		vl53l0x_api_core.c
-		vl53l0x_api_ranging.c
-		vl53l0x_api_strings.c
-		vl53l0x_platform.c
+		vl53l0x_api.cpp
+		vl53l0x_api_calibration.cpp
+		vl53l0x_api_core.cpp
+		vl53l0x_api_ranging.cpp
+		vl53l0x_api_strings.cpp
+		vl53l0x_platform.cpp
 	DEPENDS
 		platforms__common
 	)
