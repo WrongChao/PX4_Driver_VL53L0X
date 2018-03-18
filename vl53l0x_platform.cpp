@@ -80,14 +80,14 @@ int _I2CRead(VL53L0X_DEV Dev, uint8_t *pdata, uint32_t count);
 int _I2CWrite(VL53L0X_DEV Dev, uint8_t *pdata, uint32_t count) {
 	int status;
 
-	status = vl53l0x::transfer(pdata, count, 0, 0);
+	status = vl53l0x::vl53l0x_transfer(pdata, count, 0, 0);
 	return status;
 }
 
 int _I2CRead(VL53L0X_DEV Dev, uint8_t *pdata, uint32_t count) {
 	int status;
 
-	status = vl53l0x::transfer(0, 0, pdata, count);
+	status = vl53l0x::vl53l0x_transfer(0, 0, pdata, count);
 	return status;
 }
 

@@ -79,19 +79,15 @@
 
 /* Configuration Constants */
 #define VL53L0X_I2C_BUS 		PX4_I2C_BUS_EXPANSION
-#define VL53L0X_I2C_BASEADDR 	0x52 /* 7-bit address. 8-bit address is 0xE0 */
+#define VL53L0X_I2C_BASEADDR 	0x29 /* 7-bit address. 8-bit address is 0x52 */
 #define VL53L0X_DEVICE_PATH	"/dev/vl53l0x"
 
-/* MB12xx Registers addresses */
-
-#define SRF02_TAKE_RANGE_REG	0x51		/* Measure range Register */
-
 /* Device limits */
-#define VL53L0X_MIN_DISTANCE 	(0.05f)
+#define VL53L0X_MIN_DISTANCE 	(0.02f)
 #define VL53L0X_MAX_DISTANCE 	(2.00f)
 
-#define VL53L0X_CONVERSION_INTERVAL 	35000 /* 60ms for one sonar */
-#define TICKS_BETWEEN_SUCCESIVE_FIRES 	20000 /* 30ms between each sonar measurement (watch out for interference!) */
+#define VL53L0X_CONVERSION_INTERVAL 	40000 /* 60ms for one sonar */
+#define TICKS_BETWEEN_SUCCESIVE_FIRES 	40000 /* 30ms between each sonar measurement (watch out for interference!) */
 
 #ifndef CONFIG_SCHED_WORKQUEUE
 # error This requires CONFIG_SCHED_WORKQUEUE.
@@ -107,9 +103,8 @@ public:
 	virtual int 		init();
 
 	virtual ssize_t		read(device::file_t *filp, char *buffer, size_t buflen);
-	virtual int			ioctl(device::file_t *filp, int cmd, unsigned long arg);
 
-	virtual int         i2c_transfer(const uint8_t *send, unsigned send_len, uint8_t *recv, unsigned recv_len);
+	virtual int         transfer_data(const uint8_t *send, unsigned send_len, uint8_t *recv, unsigned recv_len);
 
 	/**
 	* Diagnostics - print some basic information about the driver.
@@ -280,20 +275,19 @@ VL53L0X::init()
 		DEVICE_LOG("failed to create distance_sensor object. Did you start uOrb?");
 	}
 
-	// XXX we should find out why we need to wait 200 ms here
-	usleep(200000);
-
 	/* check for connected rangefinders on each i2c port:
 	   We start from i2c base address (0x70 = 112) and count downwards
 	   So second iteration it uses i2c address 111, third iteration 110 and so on*/
-	for (unsigned counter = 0; counter <= MB12XX_MAX_RANGEFINDERS; counter++) {
+	DEVICE_LOG("add sonar\n");
+	for (unsigned counter = 0; counter <= 0; counter++) {
 		_index_counter = VL53L0X_I2C_BASEADDR + counter * 2;	/* set temp sonar i2c address to base adress + counter * 2 */
 		set_device_address(_index_counter);			/* set I2c port to temp sonar i2c adress */
 		VL53L0X_Error ret2 = init_device(_index_counter);
+		DEVICE_LOG("vl53l0x add error: %d\n", ret2);
 
 		if (ret2 == VL53L0X_ERROR_NONE) { /* sonar is present -> store address_index in array */
 			addr_ind.push_back(_index_counter);
-			DEVICE_DEBUG("sonar added");
+			DEVICE_LOG("sonar added, addredd:%d", _index_counter);
 			_latest_sonar_measurements.push_back(200);
 		}
 	}
@@ -316,9 +310,15 @@ VL53L0X::init()
 
 	DEVICE_DEBUG("Number of sonars connected: %zu", addr_ind.size());
 
+	if (addr_ind.size() == 0) {
+		return PX4_ERROR;
+	}
+
 	ret = OK;
 	/* sensor is ok, but we don't really know if it is within range */
 	_sensor_ok = true;
+
+	start();
 
 	return ret;
 }
@@ -326,27 +326,32 @@ VL53L0X::init()
 VL53L0X_Error
 VL53L0X::init_device(uint8_t address) {
 	VL53L0X_Error Status = VL53L0X_ERROR_NONE;
-	VL53L0X_DeviceInfo_t vl53l0x_dev_info;
+	// VL53L0X_DeviceInfo_t vl53l0x_dev_info;
 	VL53L0X_Dev_t *pMyDevice = &_vl53l0x_dev;
 	pMyDevice->I2cDevAddr = address;
 	pMyDevice->comms_type = 1;
-	pMyDevice->comms_speed_khz = 400;
+	pMyDevice->comms_speed_khz = 100;
 
+	DEVICE_DEBUG("VL53L0X_DataInit");
 	Status = VL53L0X_DataInit(pMyDevice); // Data initialization
 	if (Status != VL53L0X_ERROR_NONE) {
+		DEVICE_LOG("vl53l0x data init error:%d", Status);
 		return Status;
 	}
-	Status = VL53L0X_GetDeviceInfo(pMyDevice, &vl53l0x_dev_info);
-	if (Status != VL53L0X_ERROR_NONE) {
-		return Status;
-	}
-	if ((vl53l0x_dev_info.ProductRevisionMajor != 1) && (vl53l0x_dev_info.ProductRevisionMinor != 1)) {
-		Status = VL53L0X_ERROR_NOT_SUPPORTED;
-		return Status;
-	}
+	// DEVICE_DEBUG("VL53L0X_GetDeviceInfo");
+	// Status = VL53L0X_GetDeviceInfo(pMyDevice, &vl53l0x_dev_info);
+	// if (Status != VL53L0X_ERROR_NONE) {
+	// 	DEVICE_LOG("vl53l0x get device info error: %d", Status);
+	// 	return Status;
+	// }
+	// if ((vl53l0x_dev_info.ProductRevisionMajor != 1) && (vl53l0x_dev_info.ProductRevisionMinor != 1)) {
+	// 	Status = VL53L0X_ERROR_NOT_SUPPORTED;
+	// 	return Status;
+	// }
 
 	Status = vl53l0x_measure_init(pMyDevice);
 	if (Status != VL53L0X_ERROR_NONE) {
+		DEVICE_LOG("vl53l0x measure init error:%d", Status);
 		return Status;
 	}
 	return Status;
@@ -357,57 +362,71 @@ VL53L0X::vl53l0x_measure_init(VL53L0X_Dev_t *pMyDevice) {
 	VL53L0X_Error Status = VL53L0X_ERROR_NONE;
 
 	//FixPoint1616_t LimitCheckCurrent;
-	uint32_t refSpadCount;
-	uint8_t isApertureSpads;
+	// uint32_t refSpadCount;
+	// uint8_t isApertureSpads;
 	uint8_t VhvSettings;
 	uint8_t PhaseCal;
 	// Device Initialization
+	DEVICE_DEBUG("VL53L0X_StaticInit");
 	Status = VL53L0X_StaticInit(pMyDevice);
 	if (Status != VL53L0X_ERROR_NONE) {
+		DEVICE_LOG("static init error:%d", Status);
 		return Status;
 	}
 	// Device Initialization
+	DEVICE_DEBUG("VL53L0X_PerformRefCalibration");
 	Status = VL53L0X_PerformRefCalibration(pMyDevice, &VhvSettings, &PhaseCal);
 	if (Status != VL53L0X_ERROR_NONE) {
+		DEVICE_LOG("perform refcalibration error:%d", Status);
 		return Status;
 	}
 
 	// needed if a coverglass is used and no calibration has been performed
-	Status = VL53L0X_PerformRefSpadManagement(pMyDevice, &refSpadCount, &isApertureSpads);
-	if (Status != VL53L0X_ERROR_NONE) {
-		return Status;
-	}
+	// DEVICE_DEBUG("VL53L0X_PerformRefSpadManagement");
+	// Status = VL53L0X_PerformRefSpadManagement(pMyDevice, &refSpadCount, &isApertureSpads);
+	// if (Status != VL53L0X_ERROR_NONE) {
+	// 	DEVICE_LOG("performrefspadmanagement error:%d", Status);
+	// 	return Status;
+	// }
 
 	// no need to do this when we use VL53L0X_PerformSingleRangingMeasurement
-	Status = VL53L0X_SetDeviceMode(pMyDevice, VL53L0X_DEVICEMODE_CONTINUOUS_RANGING); // Setup in single ranging mode
+	DEVICE_DEBUG("VL53L0X_SetDeviceMode");
+	Status = VL53L0X_SetDeviceMode(pMyDevice, VL53L0X_DEVICEMODE_CONTINUOUS_RANGING);
 	if (Status != VL53L0X_ERROR_NONE) {
+		DEVICE_LOG("set device mode error:%d", Status);
 		return Status;
 	}
-	if (Status == VL53L0X_ERROR_NONE) {
-		Status = VL53L0X_SetLimitCheckEnable(pMyDevice,
-			VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE, 1);
-	}
-	if (Status == VL53L0X_ERROR_NONE) {
-		Status = VL53L0X_SetLimitCheckEnable(pMyDevice,
-			VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE, 1);
-	}
+	// if (Status == VL53L0X_ERROR_NONE) {
+	// 	DEVICE_DEBUG("VL53L0X_SetLimitCheckEnable: %d", VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE);
+	// 	Status = VL53L0X_SetLimitCheckEnable(pMyDevice,
+	// 		VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE, 1);
+	// }
+	// if (Status == VL53L0X_ERROR_NONE) {
+	// 	DEVICE_DEBUG("VL53L0X_SetLimitCheckEnable: %d", VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE);
+	// 	Status = VL53L0X_SetLimitCheckEnable(pMyDevice,
+	// 		VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE, 1);
+	// }
 
-	if (Status == VL53L0X_ERROR_NONE) {
-		Status = VL53L0X_SetLimitCheckValue(pMyDevice,
-			VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE,
-			(FixPoint1616_t)(0.25 * 65536));
-	}
-	if (Status == VL53L0X_ERROR_NONE) {
-		Status = VL53L0X_SetLimitCheckValue(pMyDevice,
-			VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE,
-			(FixPoint1616_t)(18 * 65536));
-	}
-	if (Status == VL53L0X_ERROR_NONE) {
-		Status = VL53L0X_SetMeasurementTimingBudgetMicroSeconds(pMyDevice,
-			200000);
-	}
+	// if (Status == VL53L0X_ERROR_NONE) {
+	// 	DEVICE_DEBUG("VL53L0X_SetLimitCheckValue: %d", VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE);
+	// 	Status = VL53L0X_SetLimitCheckValue(pMyDevice,
+	// 		VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE,
+	// 		(FixPoint1616_t)(0.25 * 65536));
+	// }
+	// if (Status == VL53L0X_ERROR_NONE) {
+	// 	DEVICE_DEBUG("VL53L0X_SetLimitCheckValue: %d",VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE);
+	// 	Status = VL53L0X_SetLimitCheckValue(pMyDevice,
+	// 		VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE,
+	// 		(FixPoint1616_t)(18 * 65536));
+	// }
+	// if (Status == VL53L0X_ERROR_NONE) {
+	// 	DEVICE_DEBUG("VL53L0X_SetMeasurementTimingBudgetMicroSeconds");
+	// 	Status = VL53L0X_SetMeasurementTimingBudgetMicroSeconds(pMyDevice,
+	// 		200000);
+	// }
 	// start ranging measure
 	if (Status == VL53L0X_ERROR_NONE) {
+		DEVICE_DEBUG("VL53L0X_StartMeasurement");
 		Status = VL53L0X_StartMeasurement(pMyDevice);
 	}
 	if (Status != VL53L0X_ERROR_NONE) {
@@ -418,7 +437,7 @@ VL53L0X::vl53l0x_measure_init(VL53L0X_Dev_t *pMyDevice) {
 }
 
 int
-VL53L0X::i2c_transfer(const uint8_t *send, unsigned send_len, uint8_t *recv, unsigned recv_len)
+VL53L0X::transfer_data(const uint8_t *send, unsigned send_len, uint8_t *recv, unsigned recv_len)
 {
 	return transfer(send, send_len, recv, recv_len);
 }
@@ -451,106 +470,6 @@ float
 VL53L0X::get_maximum_distance()
 {
 	return _max_distance;
-}
-
-int
-VL53L0X::ioctl(device::file_t *filp, int cmd, unsigned long arg)
-{
-	switch (cmd) {
-
-	case SENSORIOCSPOLLRATE: {
-			switch (arg) {
-
-			/* switching to manual polling */
-			case SENSOR_POLLRATE_MANUAL:
-				stop();
-				_measure_ticks = 0;
-				return OK;
-
-			/* external signalling (DRDY) not supported */
-			case SENSOR_POLLRATE_EXTERNAL:
-
-			/* zero would be bad */
-			case 0:
-				return -EINVAL;
-
-			/* set default/max polling rate */
-			case SENSOR_POLLRATE_MAX:
-			case SENSOR_POLLRATE_DEFAULT: {
-					/* do we need to start internal polling? */
-					bool want_start = (_measure_ticks == 0);
-
-					/* set interval for next measurement to minimum legal value */
-					_measure_ticks = USEC2TICK(_cycling_rate);
-
-					/* if we need to start the poll state machine, do it */
-					if (want_start) {
-						start();
-
-					}
-
-					return OK;
-				}
-
-			/* adjust to a legal polling interval in Hz */
-			default: {
-					/* do we need to start internal polling? */
-					bool want_start = (_measure_ticks == 0);
-
-					/* convert hz to tick interval via microseconds */
-					int ticks = USEC2TICK(1000000 / arg);
-
-					/* check against maximum rate */
-					if (ticks < USEC2TICK(_cycling_rate)) {
-						return -EINVAL;
-					}
-
-					/* update interval for next measurement */
-					_measure_ticks = ticks;
-
-					/* if we need to start the poll state machine, do it */
-					if (want_start) {
-						start();
-					}
-
-					return OK;
-				}
-			}
-		}
-
-	case SENSORIOCGPOLLRATE:
-		if (_measure_ticks == 0) {
-			return SENSOR_POLLRATE_MANUAL;
-		}
-
-		return (1000 / _measure_ticks);
-
-	case SENSORIOCSQUEUEDEPTH: {
-			/* lower bound is mandatory, upper bound is a sanity check */
-			if ((arg < 1) || (arg > 100)) {
-				return -EINVAL;
-			}
-
-			ATOMIC_ENTER;
-
-			if (!_reports->resize(arg)) {
-				ATOMIC_LEAVE;
-				return -ENOMEM;
-			}
-
-			ATOMIC_LEAVE;
-
-			return OK;
-		}
-
-	case SENSORIOCRESET:
-		/* XXX implement this */
-		return -EINVAL;
-
-	default:
-		/* give it to the superclass */
-		return I2C::ioctl(filp, cmd, arg);
-	}
 }
 
 ssize_t
@@ -612,9 +531,10 @@ VL53L0X::collect()
 	VL53L0X_RangingMeasurementData_t vl53l0x_data;
 	int	ret = -EIO;
 
+	DEVICE_DEBUG("VL53L0X_GetRangingMeasurementData");
 	status = VL53L0X_GetRangingMeasurementData(&_vl53l0x_dev, &vl53l0x_data);
 	if (status != VL53L0X_ERROR_NONE) {
-		//printf("error:Call of VL53L0X_PerformSingleRangingMeasurement\n");
+		DEVICE_DEBUG("error:Call of VL53L0X_PerformSingleRangingMeasurement: %d\n", status);
 		return ret;
 	}
 
@@ -694,19 +614,13 @@ VL53L0X::cycle()
 		_cycle_counter = 0;
 	}
 
-	/* Is there a collect->measure gap? Yes, and the timing is set equal to the cycling_rate
-	   Otherwise the next sonar would fire without the first one having received its reflected sonar pulse */
 
-	if (_measure_ticks > USEC2TICK(_cycling_rate)) {
-
-		/* schedule a fresh cycle call when we are ready to measure again */
-		work_queue(HPWORK,
-			   &_work,
-			   (worker_t)&VL53L0X::cycle_trampoline,
-			   this,
-			   _measure_ticks - USEC2TICK(_cycling_rate));
-		return;
-	}
+	/* schedule a fresh cycle call when we are ready to measure again */
+	work_queue(HPWORK,
+		   &_work,
+		   (worker_t)&VL53L0X::cycle_trampoline,
+		   this,
+		   USEC2TICK(_cycling_rate));
 }
 
 void
@@ -734,11 +648,13 @@ void	info();
 
 
 int
-transfer(const uint8_t *send, unsigned send_len, uint8_t *recv, unsigned recv_len) {
+vl53l0x_transfer(const uint8_t *send, unsigned send_len, uint8_t *recv, unsigned recv_len) {
 	if(g_dev != nullptr) {
+		usleep(10000);
 		send = send == 0 ? nullptr : send;
 		recv = recv == 0 ? nullptr : recv;
-		return g_dev->i2c_transfer(send, send_len, recv, recv_len);
+		int ret = g_dev->transfer_data(send, send_len, recv, recv_len);
+		return ret;
 	}
 	return PX4_ERROR;
 }
@@ -749,7 +665,6 @@ transfer(const uint8_t *send, unsigned send_len, uint8_t *recv, unsigned recv_le
 void
 start(uint8_t rotation)
 {
-	int fd;
 
 	if (g_dev != nullptr) {
 		errx(1, "already started");
@@ -763,17 +678,6 @@ start(uint8_t rotation)
 	}
 
 	if (OK != g_dev->init()) {
-		goto fail;
-	}
-
-	/* set the poll rate to default, starts automatic data collection */
-	fd = open(VL53L0X_DEVICE_PATH, O_RDONLY);
-
-	if (fd < 0) {
-		goto fail;
-	}
-
-	if (ioctl(fd, SENSORIOCSPOLLRATE, SENSOR_POLLRATE_DEFAULT) < 0) {
 		goto fail;
 	}
 
@@ -815,7 +719,6 @@ test()
 {
 	struct distance_sensor_s report;
 	ssize_t sz;
-	int ret;
 
 	int fd = open(VL53L0X_DEVICE_PATH, O_RDONLY);
 
@@ -834,43 +737,6 @@ test()
 	warnx("measurement: %0.2f m", (double)report.current_distance);
 	warnx("time:        %llu", report.timestamp);
 
-	/* start the sensor polling at 2Hz */
-	if (OK != ioctl(fd, SENSORIOCSPOLLRATE, 2)) {
-		errx(1, "failed to set 2Hz poll rate");
-	}
-
-	/* read the sensor 5x and report each value */
-	for (unsigned i = 0; i < 5; i++) {
-		struct pollfd fds;
-
-		/* wait for data to be ready */
-		fds.fd = fd;
-		fds.events = POLLIN;
-		ret = poll(&fds, 1, 2000);
-
-		if (ret != 1) {
-			errx(1, "timed out waiting for sensor data");
-		}
-
-		/* now go get it */
-		sz = read(fd, &report, sizeof(report));
-
-		if (sz != sizeof(report)) {
-			err(1, "periodic read failed");
-		}
-
-		warnx("periodic read %u", i);
-		warnx("valid %u", (float)report.current_distance > report.min_distance
-		      && (float)report.current_distance < report.max_distance ? 1 : 0);
-		warnx("measurement: %0.3f", (double)report.current_distance);
-		warnx("time:        %llu", report.timestamp);
-	}
-
-	/* reset the sensor polling to default rate */
-	if (OK != ioctl(fd, SENSORIOCSPOLLRATE, SENSOR_POLLRATE_DEFAULT)) {
-		errx(1, "failed to set default poll rate");
-	}
-
 	errx(0, "PASS");
 }
 
@@ -880,20 +746,6 @@ test()
 void
 reset()
 {
-	int fd = open(VL53L0X_DEVICE_PATH, O_RDONLY);
-
-	if (fd < 0) {
-		err(1, "failed ");
-	}
-
-	if (ioctl(fd, SENSORIOCRESET, 0) < 0) {
-		err(1, "driver reset failed");
-	}
-
-	if (ioctl(fd, SENSORIOCSPOLLRATE, SENSOR_POLLRATE_DEFAULT) < 0) {
-		err(1, "driver poll restart failed");
-	}
-
 	exit(0);
 }
 
